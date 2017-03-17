@@ -1,0 +1,248 @@
+'03/10/2017
+
+'This is a VBA script for converting OSP Database table Subcontracts
+'to format required for upload into new SAP-based tool
+
+'This script runs approximately a minute. For comparison, a recorded version
+'of the macro that gets the same result runs 15-20 minutes.
+
+'Instructions
+'1. Get copy of Subcontracts table from the database and paste in sheet Source
+'2. Change values in column SubFC to actual WBSE values
+'3. Delete records where WBSE (SubFC) is outside the 2000000-3999999 range
+'4. Make sure sheets Target1 and Target2 exist with column headers only
+'5. Execute script "all_steps"
+
+Option Explicit
+Option Base 1
+
+Sub all_steps()
+    
+    'Declare variables needed in the program:
+    Dim row As Long, col As Long, msg As String, source_cols(96) As String, target1_row As Integer
+    Dim row_data(96) As Variant, test_var As String, index As Integer, target2_row As Integer
+    Dim target2_data(7) As Variant, prior_end_date As Date, start_date As Date, num_periods As Integer
+    Dim salary As Single, fringe As Single, supplies As Single, travel As Single, consulting As Single
+    Dim odc As Single, idc_rate As Single, idc As Single, equipment As Single, misc As Single, i As Integer
+    Dim total_dir_cost As Single, first_period As Integer, last_per_end As Date
+    
+    Worksheets("Source").Activate
+    
+    row = 1
+    
+    'Get count of non-empty columns:
+    Do While True
+        If IsEmpty(Cells(1, row).Value) Then
+            row = row - 1
+            Exit Do
+        End If
+        row = row + 1
+    Loop
+    
+    'Check that num of columns is 96:
+    '(This process assumes there are 96 columns in source sheet)
+    If row <> 96 Then
+        MsgBox (row)
+        MsgBox ("Need to have 96 columns. Check your source data.")
+        Exit Sub
+    End If
+    
+    'Start on row 2 because row 1 is headers:
+    row = 2
+    target1_row = 2
+    target2_row = 2
+    
+    Do While True
+    
+        'Check if reached end of rows:
+        If IsEmpty(Cells(row, 1).Value) Then
+            Exit Do
+        End If
+    
+        'Collect data from a row:
+        For col = 1 To 96
+            row_data(col) = Cells(row, col).Value
+        Next
+                
+        '1) Get number of non-empty periods for this record, and
+        '2) Fix any missing period start dates
+        'Assumptions:
+        'Existance of a period is indicated by value in cols BgStart[num] and BgEnd[num];
+        'if one or both do not exist or cannnot be determined, discard the period and any following periods
+        '(if there is period end date but not a start date, take end date from prior period and add 1 day).
+        
+        num_periods = 0
+        
+        'Look at period 1:
+        '------------------
+        If Not (IsEmpty(row_data(25)) Or IsEmpty(row_data(31))) Then '25 is BgStart1, 31 is BgEnd1
+            'Both dates exist; hence period exists.
+            num_periods = num_periods + 1
+        Else
+            GoTo Line1 'skip checking any other periods
+        End If
+        
+        'Look at period 2-6:
+        '------------------
+        For index = 0 To 4
+            If IsEmpty(row_data(32 + index)) Then '32 is BgEnd2, 33 is BgEnd3, etc
+                GoTo Line1 'skip checking any other periods
+            ElseIf IsEmpty(row_data(26 + index)) Then '26 is BgStart2, etc.
+                'Missing a start date. Fix it.
+                prior_end_date = row_data(31 + index) '31 is BgEnd1. etc.
+                row_data(26 + index) = prior_end_date + 1
+                num_periods = num_periods + 1
+            Else
+                'Both dates exist; hence period exists.
+                num_periods = num_periods + 1
+            End If
+        Next
+        
+Line1:
+
+        If num_periods = 0 Then
+            GoTo Line2
+        End If
+        
+        'Determine if subward is active; if not active - skip it
+        'Active means the last budget period end date is > 7/1/2015
+        last_per_end = row_data(30 + num_periods) '31 is BgEnd1, etc.
+        If last_per_end < 42186 Then '42186 is 7/1/2015
+            GoTo Line2
+        End If
+        
+        'Insert data into target sheet 1:
+        Sheets("Target1").Cells(target1_row, 1).Value = row_data(2)   'WBSE data
+        Sheets("Target1").Cells(target1_row, 2).Value = row_data(21)  'State
+        Sheets("Target1").Cells(target1_row, 3).Value = row_data(22)  'Country
+        Sheets("Target1").Cells(target1_row, 4).Value = row_data(6)   'Subaward number
+        Sheets("Target1").Cells(target1_row, 5).Value = row_data(7)   'FFATA
+        Sheets("Target1").Cells(target1_row, 6).Value = row_data(10)  'Final Invoice Due
+        Sheets("Target1").Cells(target1_row, 7).Value = row_data(15)  'GL break
+        Sheets("Target1").Cells(target1_row, 8).Value = row_data(12)  'prior year WBSE
+        Sheets("Target1").Cells(target1_row, 9).Value = row_data(11)  'OSP notes
+        Sheets("Target1").Cells(target1_row, 9).WrapText = False
+        Sheets("Target1").Cells(target1_row, 13).Value = row_data(14) 'manual prior exp
+        
+        target1_row = target1_row + 1
+        
+        'Determine first Fiscal period num using the following rule:
+        'last period is always 9, the one before is 8, etc.
+        first_period = 10 - num_periods
+        
+        'Insert records into Target2:
+        For index = 0 To (num_periods - 1)
+        
+            target2_data(1) = row_data(2)          'WBSA
+            target2_data(2) = row_data(25 + index) 'BgStart
+            target2_data(3) = row_data(31 + index) 'BgEnd
+            target2_data(6) = first_period + index 'Fiscal period
+            target2_data(7) = 2017                 'Fiscal year
+            
+            salary = row_data(37 + index)
+            If Not (IsNull(salary) Or salary = 0) Then
+                target2_data(4) = Application.WorksheetFunction.Round(salary, 2)
+                target2_data(5) = "693541"
+                For i = 1 To 7
+                    Sheets("Target2").Cells(target2_row, i).Value = target2_data(i)
+                Next
+                target2_row = target2_row + 1
+            End If
+            
+            fringe = row_data(43 + index)
+            If Not (IsNull(fringe) Or fringe = 0) Then
+                target2_data(4) = Application.WorksheetFunction.Round(fringe, 2)
+                target2_data(5) = "693542"
+                For i = 1 To 7
+                    Sheets("Target2").Cells(target2_row, i).Value = target2_data(i)
+                Next
+                target2_row = target2_row + 1
+            End If
+            
+            supplies = row_data(49 + index)
+            If Not (IsNull(supplies) Or supplies = 0) Then
+                target2_data(4) = Application.WorksheetFunction.Round(supplies, 2)
+                target2_data(5) = "693545"
+                For i = 1 To 7
+                    Sheets("Target2").Cells(target2_row, i).Value = target2_data(i)
+                Next
+                target2_row = target2_row + 1
+            End If
+            
+            travel = row_data(55 + index)
+            If Not (IsNull(travel) Or travel = 0) Then
+                target2_data(4) = Application.WorksheetFunction.Round(travel, 2)
+                target2_data(5) = "693550"
+                For i = 1 To 7
+                    Sheets("Target2").Cells(target2_row, i).Value = target2_data(i)
+                Next
+                target2_row = target2_row + 1
+            End If
+            
+            consulting = row_data(61 + index)
+            If Not (IsNull(consulting) Or consulting = 0) Then
+                target2_data(4) = Application.WorksheetFunction.Round(consulting, 2)
+                target2_data(5) = "693543"
+                For i = 1 To 7
+                    Sheets("Target2").Cells(target2_row, i).Value = target2_data(i)
+                Next
+                target2_row = target2_row + 1
+            End If
+            
+            odc = row_data(67 + index)
+            If Not (IsNull(odc) Or odc = 0) Then
+                target2_data(4) = Application.WorksheetFunction.Round(odc, 2)
+                target2_data(5) = "693548"
+                For i = 1 To 7
+                    Sheets("Target2").Cells(target2_row, i).Value = target2_data(i)
+                Next
+                target2_row = target2_row + 1
+            End If
+            
+            idc_rate = row_data(73 + index)
+            If Not (IsNull(idc_rate) Or idc_rate = 0) Then
+                total_dir_cost = salary + fringe + supplies + travel + consulting + odc
+                If total_dir_cost > 0 Then
+                    idc = (total_dir_cost * idc_rate) + row_data(79 + index) '79 is Adj
+                    target2_data(4) = Application.WorksheetFunction.Round(idc, 2)
+                    target2_data(5) = "693558"
+                    For i = 1 To 7
+                        Sheets("Target2").Cells(target2_row, i).Value = target2_data(i)
+                    Next
+                    target2_row = target2_row + 1
+                End If
+            End If
+            
+            equipment = row_data(85 + index)
+            If Not (IsNull(equipment) Or equipment = 0) Then
+                target2_data(4) = Application.WorksheetFunction.Round(equipment, 2)
+                target2_data(5) = "693547"
+                For i = 1 To 7
+                    Sheets("Target2").Cells(target2_row, i).Value = target2_data(i)
+                Next
+                target2_row = target2_row + 1
+            End If
+            
+            misc = row_data(91 + index)
+            If Not (IsNull(misc) Or misc = 0) Then
+                target2_data(4) = Application.WorksheetFunction.Round(misc, 2)
+                target2_data(5) = "693559"
+                For i = 1 To 7
+                    Sheets("Target2").Cells(target2_row, i).Value = target2_data(i)
+                Next
+                target2_row = target2_row + 1
+            End If
+
+        Next
+        
+Line2:
+        
+        row = row + 1
+
+    Loop
+    
+    MsgBox ("Processing completed")
+    
+End Sub
+
+
