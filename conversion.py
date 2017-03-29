@@ -1,24 +1,33 @@
 # Build time: 3/13/2017-3/16/2017
 
 # = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = =
-# SCRIPT FOR CONVERTING OSP DATABASE TABLES (SUBCONTRACTS, INVOICES) 
-# FOR UPLOAD INTO NEW SAP-BASED TOOL
+# SCRIPT FOR CONVERTING DATA FOR MIGRATION FROM THE OLD SYSTEM TO NEW.
+# THE OLD SYSTEM IS OSP'S ACCESS DATABASE, MAINLY TABLES SUBCONTRACTS
+# AND INVOICES. THE NEW SYSTEM IS SAP-BASED APP WITH SAME FUNCTIONALITY.
 # = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = =
 
-# INPUTS:
-# input_subs.txt, input_invs.txt, input_zfr1d.txt, input_subs_countries.txt
-# OUTPUTS:
-# output_subs.txt, output_subs_details.txt, output_invs.txt, output_invs_details.txt
+# INPUTS FILES:
+# input_subs.txt - contains raw dump from table Subcontracts
+# input_invs.txt - raw dump from table Invoices
+# input_zfr1d.txt - data I extract from SAP
+# input_subs_countries.txt - subset of data from table Subcontractors
+# input_budget_diffs.txt - budget diffs data from SAP spool file
+
+# OUTPUTS FILES:
+# output_subs.txt
+# output_subs_details.txt
+# output_invs.txt
+# output_invs_details.txt
+
 # OPTIONAL FILES:
-# subs_include.txt, subs_exclude.txt
-# (if provided subs_include, only those subs will be processed, and
-#  if proviced subs_exclude, all subs excluding those will be processed)
+# subs_include.txt - if provided, only the listed subs will be processed
+# subs_exclude.txt - if proviced, all except the listed subs will be processed
 
 # Before exporting data from OSP database, run these two queries to remove line breaks:
 # UPDATE Subcontracts SET Comm1 = Replace(Replace(Nz([Comm1],""),Chr(10),"; "),Chr(13),"; ");
 # UPDATE Invoices SET Comm1 = Replace(Replace(Nz([Comm1],""),Chr(10),"; "),Chr(13),"; ");
 
-# Rules for formatting source data when exporting from Access database:
+# How to format data when exporting from Access tables:
 # 1. Use the pipe character to delimit fields
 # 2. Don't use quotes around text
 # 3. Don't use headers
@@ -50,10 +59,10 @@ except OSError: pass
 try: os.remove('output_invs_details.txt')
 except OSError: pass
 
-for input_fname in ['input_subs.txt', 'input_invs.txt', 'input_zfr1d.txt', 'input_subs_countries.txt']:
+for input_fname in ['input_subs.txt', 'input_invs.txt', 'input_zfr1d.txt', 'input_subs_countries.txt', 'input_budget_diffs.txt']:
 	if not os.path.exists(input_fname):
 		print('Some input files are missing:')
-		print('input_subs.txt, input_invs.txt, input_zfr1d.txt, or input_subs_countries.txt')
+		print('input_subs.txt, input_invs.txt, input_zfr1d.txt, input_subs_countries.txt, or input_budget_diffs.txt')
 		print('-' * 51); print('Program terminated early'); print('-' * 51)
 		exit()
 
@@ -64,6 +73,7 @@ input_subs = open('input_subs.txt', encoding='utf8')
 input_invs = open('input_invs.txt', encoding='utf8')
 input_zfr1d = open('input_zfr1d.txt', encoding='utf8')
 input_subs_countries = open('input_subs_countries.txt', encoding='utf8')
+input_budget_diffs = open('input_budget_diffs.txt', encoding='utf8')
 
 log_file = open('log.txt', 'a', encoding='utf8')
 log_file.write('----- Start: ' + str(datetime.now()) + ' -----\n')
@@ -114,9 +124,11 @@ def padded_text(text, taken, total=50):
 def text_to_float(text):
 	'''
 	Accepts a text that represents a dollar amount, cleans it up 
-	and returns the float value or 0.
+	and returns the float value or 0. Specifically, it removes white space,
+	the dollar sign, commas, and if it encounters parens - it removes
+	those and prepends the value with a minus sign.
 	'''
-	text = text.strip().strip('$')
+	text = text.strip().strip('$').replace(',','')
 	if '(' in text:
 		text = text.strip('(').strip(')').strip('$')
 		text = '-' + text
@@ -207,21 +219,18 @@ def get_gl_bucket(gl_break, prior_exp, this_amt):
 		gl_bucket = 3
 	return gl_bucket
 
-# read all subs into a variable
 to_print = 'Reading subaward records...'
 print(to_print, end='')
 raw_subs = input_subs.readlines()
 count = len(raw_subs)
 print(padded_text(count, len(to_print)))
 
-# read all invoices into a variable
 to_print = 'Reading invoice records...'
 print(to_print, end='')
 raw_invs = input_invs.readlines()
 count = len(raw_invs)
 print(padded_text(count, len(to_print)))
 
-# read zfr1d list into a variable
 to_print = 'Reading zfr1d records...'
 print(to_print, end='')
 raw_zfr1d_recs = input_zfr1d.readlines()
@@ -243,6 +252,23 @@ for line in raw_lines:
 	line = line.split()
 	subs_countries[int(line[0])] = line[1]
 count = len(subs_countries)
+print(padded_text(count, len(to_print)))
+# cleanup
+del raw_lines
+
+to_print = 'Reading budget diffs data...'
+print(to_print, end='')
+raw_lines = input_budget_diffs.readlines()
+budget_diffs = {}
+for line in raw_lines:
+	line = line.strip()
+	line = line.split()
+	wbse_data = line[0].strip()
+	db_amt = text_to_float(line[1])
+	sap_amt = text_to_float(line[2])
+	diff_amt = str(round((sap_amt - db_amt), 2))
+	budget_diffs[wbse_data] = diff_amt
+count = len(budget_diffs)
 print(padded_text(count, len(to_print)))
 # cleanup
 del raw_lines
@@ -411,9 +437,9 @@ print(padded_text('OK', len(to_print)))
 subs = upd_subs
 del upd_subs
 
-# check for include/exclude list
-# if include list exists, only include those subs (and their invs) in the output
-# if exclude list exists, excluding those subs
+# check for include/exclude list:
+#   if include list exists, only include those subs in the output
+#   if exclude list exists, excluding those subs
 if subs_include:
 
 	subs_include = subs_include.readlines()
@@ -530,7 +556,8 @@ for sub in subs:
 	sub = sub.split('|')
 
 	out_subs.append(sub[1].strip())      # wbse
-	out_subs.append(sub[20].strip())     # state
+	out_subs.append('') 						     # skip row (used to be state)
+	# out_subs.append(sub[20].strip())   # state
 	out_subs.append(sub[21].strip())     # country
 	out_subs.append(sub[5].strip())      # subaward number
 	out_subs.append(sub[6].strip())      # ffata
@@ -662,6 +689,16 @@ for sub in subs:
 			sub_detail = '|'.join(sub_detail)
 			outfile_subs_details.write(sub_detail + '\n')
 			output2_count += 1
+		else:
+			# add one last record in period 9 if budget diff exists
+			if fisc_per == '9':
+				if wbse in budget_diffs:
+					amount = budget_diffs[wbse]
+					category = '099650'
+					sub_detail = [wbse, fisc_per, fisc_yr, start, end, amount, category, idc_rate_reformatted]
+					sub_detail = '|'.join(sub_detail)
+					outfile_subs_details.write(sub_detail + '\n')
+					output2_count += 1
 
 	if non_zero_periods_exist:
 		# write the sub record to output
