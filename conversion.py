@@ -1,4 +1,5 @@
-# Build time: 3/13/2017-3/16/2017
+# Built: 3/13/2017-3/16/2017
+# Updated: 7/31/2017
 
 # = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = =
 # SCRIPT FOR CONVERTING DATA FOR MIGRATION FROM THE OLD SYSTEM TO NEW.
@@ -9,7 +10,7 @@
 # INPUTS FILES:
 # input_subs.txt - contains raw dump from table Subcontracts
 # input_invs.txt - raw dump from table Invoices
-# input_zfr1d.txt - data I extract from SAP
+# input_zfr1e.txt - data I extract from SAP, see detailed notes below
 # input_subs_countries.txt - subset of data from table Subcontractors
 # input_budget_diffs.txt - budget diffs data from SAP spool file
 
@@ -28,11 +29,35 @@
 # UPDATE Invoices SET Comm1 = Replace(Replace(Nz([Comm1],""),Chr(10),"; "),Chr(13),"; ");
 
 # How to format data when exporting from Access tables:
+# -------------------------------------------------------
 # 1. Use the pipe character to delimit fields
 # 2. Don't use quotes around text
 # 3. Don't use headers
 # 4. Use Unicode UTF-8 encoding
 # 5. Use double digits for months and days, and 4 digits for year
+
+# How to create 'input_zfr1e.txt' file:
+# -------------------------------------------------------
+#    This data will drive the Invoice Type (DB or ADJ) - if a sub is in this
+#    data, all its invoices will get type ADJ; otherwise type DB.
+# 1. In ECC, run transaction ZFR1E (note, we changed from ZFR1D)
+# 2. Into Project field, copy all WBSEs from exported database file
+# 3. Into Cost element field, enter SP_SUBTOOL
+# 4. For Fiscal year and Period, go with defaults (current values)
+# 5. Execute
+# 6. In column ITD Actual, double click on Cost Element Group to get line item detail
+#    for subawards that had activity in the cost element group
+# 7. Filter out cost elements 691600 and 697100
+# 8. Export to Excel and get list of WBSE's only (Project def. column)
+# 9. Place the list in a text file and call it 'input_zfr1d.txt'
+
+# How to create 'input_subs_countries.txt' file:
+# -------------------------------------------------------
+# 1. Export all data from the database table Subcontrators
+# 2. Isolate columns ID and Country (but not AudCountry)
+# 3. Get country codes from SAP (or use ready file 'sap_country_codes.txt')
+# 4. VLOOKUP values between Country and SAP country codes
+# 5. Create a list of IDs and Country codes and save in file 'input_subs_countries.txt'
 
 import os
 from datetime import datetime, timedelta, date
@@ -59,10 +84,10 @@ except OSError: pass
 try: os.remove('output_invs_details.txt')
 except OSError: pass
 
-for input_fname in ['input_subs.txt', 'input_invs.txt', 'input_zfr1d.txt', 'input_subs_countries.txt', 'input_budget_diffs.txt']:
+for input_fname in ['input_subs.txt', 'input_invs.txt', 'input_zfr1e.txt', 'input_subs_countries.txt', 'input_budget_diffs.txt']:
 	if not os.path.exists(input_fname):
-		print('Some input files are missing:')
-		print('input_subs.txt, input_invs.txt, input_zfr1d.txt, input_subs_countries.txt, or input_budget_diffs.txt')
+		print('Missing one or more of these input files:')
+		print('input_subs.txt, input_invs.txt, input_zfr1e.txt, input_subs_countries.txt, or input_budget_diffs.txt')
 		print('-' * 51); print('Program terminated early'); print('-' * 51)
 		exit()
 
@@ -71,7 +96,7 @@ sleep(1)
 # open needed files
 input_subs = open('input_subs.txt', encoding='utf8')
 input_invs = open('input_invs.txt', encoding='utf8')
-input_zfr1d = open('input_zfr1d.txt', encoding='utf8')
+input_zfr1e = open('input_zfr1e.txt', encoding='utf8')
 input_subs_countries = open('input_subs_countries.txt', encoding='utf8')
 input_budget_diffs = open('input_budget_diffs.txt', encoding='utf8')
 
@@ -91,7 +116,31 @@ if os.path.exists('subs_exclude.txt'):
 else:
 	subs_exclude = None
 
-budget_items = [
+categories_list = [
+	'salary',
+	'fringe',
+	'supplies',
+	'travel',
+	'consulting',
+	'odc',
+	'idc',
+	'equipment',
+	'misc'
+]
+
+budget_categories = {
+	'salary':     '693541',
+	'fringe':     '693542',
+	'supplies':   '693545',
+	'travel':     '693550',
+	'consulting': '693543',
+	'odc':        '693548',
+	'idc':        '693558',
+	'equipment':  '693547',
+	'misc':       '693559'
+}
+
+exp_categories = [
 	('691641', '697141'), # salary
 	('691642', '697142'), # fringe
 	('691645', '697145'), # supplies
@@ -156,10 +205,10 @@ def is_date_reasonable(date_val):
 
 def check_budget_periods(sub):
 	'''
-	Accepts a sub and returns a two-element tuple where the first
-	value is the number of valid budget periods found for this sub,
-	and the second value is either None (if the first value = 0) or
-	the same or updated sub record (updated if found and fixed any
+	Accepts a sub and returns a three-element tuple where the first
+	value is wbse, the second is the number of valid budget periods found
+	for this sub, and the third value is either None (if the first value = 0)
+	or the same or updated sub record (updated if found and fixed any
 	missing start dates).
 
 	A budget period is considered valid and included in the count
@@ -169,10 +218,11 @@ def check_budget_periods(sub):
 	# initial_sub = sub
 	sub = sub.strip()
 	sub = sub.split('|')
+	wbse = sub[1].strip()
 	per1_start = sub[24].strip()
 	per1_end = sub[30].strip()
 	if not per1_start	or not per1_end:
-		return 0, None
+		return wbse, 0, None
 	else:
 		valid_periods	+= 1
 		# check remaining periods
@@ -200,11 +250,11 @@ def check_budget_periods(sub):
 						end = sub[31 + i].strip()
 						if start or end:
 							# an odd period possibly exists - let Nate know about this sub
-							log_file.write('Sub '+sub[1]+' may have periods ignored by tool\n')
+							log_file.write('Sub wbse='+sub[1]+' may have periods ignored by tool\n')
 					break
 	sub.append(str(valid_periods))
 	sub = '|'.join(sub)
-	return(valid_periods, sub)
+	return(wbse, valid_periods, sub)
 
 def get_gl_bucket(gl_break, prior_exp, this_amt):
 	'''
@@ -231,17 +281,17 @@ raw_invs = input_invs.readlines()
 count = len(raw_invs)
 print(padded_text(count, len(to_print)))
 
-to_print = 'Reading zfr1d records...'
+to_print = 'Reading zfr1e records...'
 print(to_print, end='')
-raw_zfr1d_recs = input_zfr1d.readlines()
-zfr1d_recs = []
-for rec in raw_zfr1d_recs:
+raw_zfr1e_recs = input_zfr1e.readlines()
+zfr1e_recs = []
+for rec in raw_zfr1e_recs:
 	rec = rec.strip()
-	zfr1d_recs.append(rec)
-count = len(zfr1d_recs)
+	zfr1e_recs.append(rec)
+count = len(zfr1e_recs)
 print(padded_text(count, len(to_print)))
 # cleanup
-del raw_zfr1d_recs
+del raw_zfr1e_recs
 
 to_print = 'Reading subaward country data...'
 print(to_print, end='')
@@ -341,105 +391,9 @@ del clean_invs
 del raw_invs
 del remaining_sub_ids
 
-to_print = 'Fixing period start dates...'
-print(to_print, end='')
-i = 0
-num_periods = 0
-clean_subs = []
-dropped_subs = []
-for sub in subs:
-	valid_periods, updated_sub = check_budget_periods(sub)
-	if valid_periods:
-		clean_subs.append(updated_sub)
-		i += 1
-	else:
-		dropped_subs.append(sub)
-print(padded_text(i, len(to_print	)))
-to_print = 'Subs dropped for not having valid periods...'
-print(to_print, end='')
-print(padded_text(len(dropped_subs), len(to_print)))
-# cleanup
-subs = clean_subs
-del clean_subs
-del dropped_subs
-
-# remove inactive subs (end date < 7/1/2015)
-to_print = 'Removing inactive subs...'
-print(to_print, end='')
-i = 0
-clean_subs = []
-remaining_sub_ids = []
-for sub in subs:
-	raw_sub = sub # remember the raw version
-	sub = sub.strip()
-	sub = sub.split('|')
-	index = 29 + int(sub[96])
-	last_per_end = sub[index][0:10]
-	last_per_end = datetime.strptime(last_per_end, '%m/%d/%Y')
-	if last_per_end < datetime(year=2015, month=7, day=1):
-		i += 1
-	else:
-		remaining_sub_ids.append(sub[0])
-		clean_subs.append(raw_sub)
-print(padded_text(i, len(to_print)))
-# cleanup
-subs = clean_subs
-del clean_subs
-
-to_print = 'Removing inactive invoices...'
-print(to_print, end='')
-i = 0
-clean_invs = []
-for inv in invs:
-	raw_inv = inv.strip()
-	inv = inv.strip()
-	inv = inv.split('|')
-	sub_id = inv[1]
-	if sub_id in remaining_sub_ids:
-		clean_invs.append(raw_inv)
-	else:
-		i += 1
-print(padded_text(i, len(to_print)))
-# cleanup
-invs = clean_invs
-del clean_invs
-del remaining_sub_ids
-
-to_print = 'Updating subs with zfr1d data...'
-print(to_print, end='')
-upd_subs = []
-for sub in subs:
-	raw_sub = sub.strip()
-	sub = raw_sub.split('|')
-	if sub[1] in zfr1d_recs:
-		upd_subs.append(raw_sub + '|ADJ')
-	else:
-		upd_subs.append(raw_sub + '|DB')
-print(padded_text('OK', len(to_print)))
-# cleanup
-subs = upd_subs
-del upd_subs
-del zfr1d_recs
-
-to_print = 'Updating subs with correct country codes...'
-print(to_print, end='')
-upd_subs = []
-for sub in subs:
-	raw_sub = sub.strip()
-	sub = raw_sub.split('|')
-	subtor_id = int(sub[2])
-	country_code = subs_countries.get(subtor_id, 'US') # default is US
-	sub[21] = country_code
-	sub = '|'.join(sub)
-	upd_subs.append(sub)
-print(padded_text('OK', len(to_print)))
-# cleanup
-subs = upd_subs
-del upd_subs
-
 # check for include/exclude list:
 #   if include list exists, only include those subs in the output
-#   if exclude list exists, excluding those subs
+#   if exclude list exists, exclude those subs
 if subs_include:
 
 	subs_include = subs_include.readlines()
@@ -514,6 +468,103 @@ elif subs_exclude:
 	invs = clean_invs
 	del clean_invs
 
+to_print = 'Fixing period start dates...'
+print(to_print, end='')
+i = 0
+num_periods = 0
+clean_subs = []
+dropped_subs = []
+for sub in subs:
+	wbse, valid_periods, updated_sub = check_budget_periods(sub)
+	if valid_periods:
+		clean_subs.append(updated_sub)
+		i += 1
+	else:
+		dropped_subs.append(sub)
+		log_file.write('Sub wbse=' + wbse + ' dropped for not having any valid periods\n')
+print(padded_text(i, len(to_print	)))
+to_print = 'Subs dropped for not having valid periods...'
+print(to_print, end='')
+print(padded_text(len(dropped_subs), len(to_print)))
+# cleanup
+subs = clean_subs
+del clean_subs
+del dropped_subs
+
+# remove inactive subs (end date < 7/1/2015)
+to_print = 'Removing inactive subs...'
+print(to_print, end='')
+i = 0
+clean_subs = []
+remaining_sub_ids = []
+for sub in subs:
+	raw_sub = sub # remember the raw version
+	sub = sub.strip()
+	sub = sub.split('|')
+	index = 29 + int(sub[96])
+	last_per_end = sub[index][0:10]
+	last_per_end = datetime.strptime(last_per_end, '%m/%d/%Y')
+	if last_per_end < datetime(year=2015, month=7, day=1):
+		i += 1
+	else:
+		remaining_sub_ids.append(sub[0])
+		clean_subs.append(raw_sub)
+print(padded_text(i, len(to_print)))
+# cleanup
+subs = clean_subs
+del clean_subs
+
+to_print = 'Removing inactive invoices...'
+print(to_print, end='')
+i = 0
+clean_invs = []
+for inv in invs:
+	raw_inv = inv.strip()
+	inv = inv.strip()
+	inv = inv.split('|')
+	sub_id = inv[1]
+	if sub_id in remaining_sub_ids:
+		clean_invs.append(raw_inv)
+	else:
+		i += 1
+print(padded_text(i, len(to_print)))
+# cleanup
+invs = clean_invs
+del clean_invs
+del remaining_sub_ids
+
+to_print = 'Updating subs with zfr1e data...'
+print(to_print, end='')
+upd_subs = []
+for sub in subs:
+	raw_sub = sub.strip()
+	sub = raw_sub.split('|')
+	if sub[1] in zfr1e_recs:
+		upd_subs.append(raw_sub + '|ADJ')
+	else:
+		upd_subs.append(raw_sub + '|DB')
+print(padded_text('OK', len(to_print)))
+# cleanup
+subs = upd_subs
+del upd_subs
+del zfr1e_recs
+
+to_print = 'Updating subs with correct country codes...'
+print(to_print, end='')
+upd_subs = []
+for sub in subs:
+	raw_sub = sub.strip()
+	sub = raw_sub.split('|')
+	subtor_id = int(sub[2])
+	country_code = subs_countries.get(subtor_id, 'US') # default is US
+	sub[21] = country_code
+	sub = '|'.join(sub)
+	upd_subs.append(sub)
+print(padded_text('OK', len(to_print)))
+# cleanup
+subs = upd_subs
+del upd_subs
+
 to_print ='Sorting subs by wbse value...'
 print(to_print, end='')
 temp_subs = []
@@ -537,7 +588,8 @@ output2_count = 0
 output3_count = 0
 output4_count = 0
 subs_dropped_for_zero_budgets = 0
-invs_dropped_for_zero_amount = 0
+subs_fixed_with_dollar_adds = 0
+invs_with_zero_total = 0
 
 # write file headers
 header_subs = 'WBSE|State|Country|Subaward Number|FFATA|Final Invoice Due|G/L Break|Prior Year WBSE|OSP Notes|IDC Default|Received Date|Subrecipient PI Name|Manual Prior Exp|Type of Subaward|Type of Payment|Invoice Requirements|Equipment|Budgetary Changes|Budget Restrictions|Special T&C'
@@ -564,7 +616,8 @@ for sub in subs:
 	out_subs.append(sub[9].strip())      # final invoice due
 	gl_break = text_to_float(sub[14])
 	out_subs.append(str(gl_break))       # gl break
-	out_subs.append(sub[11].strip())     # prior year wbse
+	out_subs.append('') 						     # skip row (used to be prior year wbse)
+	# out_subs.append(sub[11].strip())   # prior year wbse
 	out_subs.append(sub[10].strip())     # osp notes
 	out_subs.append('X') 						     # idc default (always X)
 	current_date = datetime.now()
@@ -585,6 +638,9 @@ for sub in subs:
 	# if line items have values - write the period to the output file, 
 	# and conversely, if no values in any line items - skip that period.
 	non_zero_periods_exist = 0
+
+	used_budget_categories = set() # to keep track of which categories are used
+
 	for i in range(0, num_periods):
 
 		wbse = sub[1].strip()
@@ -603,7 +659,7 @@ for sub in subs:
 		# check if end date is greater than start date; make a log entry if true
 		dates_diff = text_to_date(end) - text_to_date(start)
 		if dates_diff <= timedelta(days = 0):
-			log_file.write('Sub wbse=' + wbse + ' has a strange Start-End date range\n')
+			log_file.write('Sub wbse=' + wbse + ' has start date >= end date in period ' + str(i+1) + ' but will still be migrated\n')
 
 		line_items = []
 
@@ -611,49 +667,55 @@ for sub in subs:
 		salary = sub[36 + i]
 		salary = text_to_float(salary)
 		if salary:
-			salary = str(salary)
-			category = '693541'
-			line_items.append((salary, category))
+			category_amt = str(salary)
+			category_gl = budget_categories['salary']
+			line_items.append((category_amt, category_gl))
+			used_budget_categories.add(category_gl)
 		
 		# fringe
 		fringe = sub[42 + i]
 		fringe = text_to_float(fringe)
 		if fringe:
-			fringe = str(fringe)
-			category = '693542'
-			line_items.append((fringe, category))
+			category_amt = str(fringe)
+			category_gl = budget_categories['fringe']
+			line_items.append((category_amt, category_gl))
+			used_budget_categories.add(category_gl)
 
 		# supplies
 		supplies = sub[48 + i]
 		supplies = text_to_float(supplies)
 		if supplies:
-			supplies = str(supplies)
-			category = '693545'
-			line_items.append((supplies, category))
+			category_amt = str(supplies)
+			category_gl = budget_categories['supplies']
+			line_items.append((category_amt, category_gl))
+			used_budget_categories.add(category_gl)
 
 		# travel
 		travel = sub[54 + i]
 		travel = text_to_float(travel)
 		if travel:
-			travel = str(travel)
-			category = '693550'
-			line_items.append((travel, category))
+			category_amt = str(travel)
+			category_gl = budget_categories['travel']
+			line_items.append((category_amt, category_gl))
+			used_budget_categories.add(category_gl)
 
 		# consulting
 		consulting = sub[60 + i]
 		consulting = text_to_float(consulting)
 		if consulting:
-			consulting = str(consulting)
-			category = '693543'
-			line_items.append((consulting, category))
+			category_amt = str(consulting)
+			category_gl = budget_categories['consulting']
+			line_items.append((category_amt, category_gl))
+			used_budget_categories.add(category_gl)
 
 		# odc (other direct cost)
 		odc = sub[66 + i]
 		odc = text_to_float(odc)
 		if odc:
-			odc = str(odc)
-			category = '693548'
-			line_items.append((odc, category))
+			category_amt = str(odc)
+			category_gl = budget_categories['odc']
+			line_items.append((category_amt, category_gl))
+			used_budget_categories.add(category_gl)
 
 		# idc (indirect cost)
 		if idc_rate:
@@ -663,39 +725,48 @@ for sub in subs:
 			if direct_cost:
 				idc = direct_cost * idc_rate + adj_amt
 				idc = str(round(idc, 2))
-				category = '693558'
-				line_items.append((idc, category))
+				category_gl = budget_categories['idc']
+				line_items.append((idc, category_gl))
 
 		# equipment
 		equipment = sub[84 + i]
 		equipment = text_to_float(equipment)
 		if equipment:
-			equipment = str(equipment)
-			category = '693547'
-			line_items.append((equipment, category))
+			category_amt = str(equipment)
+			category_gl = budget_categories['equipment']
+			line_items.append((category_amt, category_gl))
+			used_budget_categories.add(category_gl)
 
 		# misc
 		misc = sub[90 + i]
 		misc = text_to_float(misc)
 		if misc:
-			misc = str(misc)
-			category = '693559'
-			line_items.append((misc, category))
+			category_amt = str(misc)
+			category_gl = budget_categories['misc']
+			line_items.append((category_amt, category_gl))
+			used_budget_categories.add(category_gl)
 
 		# write to file
-		for amount, category in line_items:
+		for amount, category_gl in line_items:
 			non_zero_periods_exist += 1
-			sub_detail = [wbse, fisc_per, fisc_yr, start, end, amount, category, idc_rate_reformatted]
+			sub_detail = [wbse, fisc_per, fisc_yr, start, end, amount, category_gl, idc_rate_reformatted]
 			sub_detail = '|'.join(sub_detail)
 			outfile_subs_details.write(sub_detail + '\n')
 			output2_count += 1
 		else:
 			# add one last record in period 9 if budget diff exists
+			# also, store some values for a later use (to add/subtract $1) 
 			if fisc_per == '9':
+				last_wbse = wbse
+				last_fisc_per = fisc_per
+				last_fisc_yr = fisc_yr
+				last_start = start
+				last_end = end
+				last_idc_rate_reformatted = idc_rate_reformatted
 				if wbse in budget_diffs:
 					amount = budget_diffs[wbse]
-					category = '099650'
-					sub_detail = [wbse, fisc_per, fisc_yr, start, end, amount, category, idc_rate_reformatted]
+					category_gl = '099650'
+					sub_detail = [wbse, fisc_per, fisc_yr, start, end, amount, category_gl, idc_rate_reformatted]
 					sub_detail = '|'.join(sub_detail)
 					outfile_subs_details.write(sub_detail + '\n')
 					output2_count += 1
@@ -706,7 +777,7 @@ for sub in subs:
 		output1_count += 1
 	else:
 		# the sub doesn't have any non-zero budgets; skip to next sub.
-		log_file.write('Sub wbse=' + wbse + ' skipped for not having any non-zero budgets\n')
+		log_file.write('Sub wbse=' + wbse + ' dropped for not having any non-zero budgets\n')
 		subs_dropped_for_zero_budgets += 1
 		continue
 
@@ -737,8 +808,9 @@ for sub in subs:
 		sub_invs.sort(key=itemgetter(0))   # secondary sort (by ID)
 		sub_invs.sort(key=itemgetter(24))  # primary sort (by end date)
 
+		used_exp_categories = set() # to keep track of non-zero exp categories
+		
 		for inv in sub_invs:
-
 			# collect all line items (salary - misc)
 			line_items = []
 			for i in range(25,35):
@@ -751,9 +823,11 @@ for sub in subs:
 			total_inv_amount = direct_cost + idc + sum(line_items[8:])
 
 			if not total_inv_amount:
-				# log_file.write('Inv ' + str(inv[0]) + ' skipped because total amt = 0\n')
-				invs_dropped_for_zero_amount += 1
-				continue
+				log_file.write('Inv id=' + str(round(inv[0])) + ' has total amt = 0 but will still be migrated\n')
+				invs_with_zero_total += 1
+				# We used to drop invoices with 0 totals.
+				# As of July 2017, we keep them but still log them for information.
+				#continue
 
 			line_items[6] = idc # replace idc_rate with idc amount
 			line_items.pop(7)   # remove adj item
@@ -768,7 +842,7 @@ for sub in subs:
 			out_invs.append(rec_date)               # received date
 			if rec_date:
 				if not is_date_reasonable(text_to_date(rec_date)):
-					log_file.write('Inv id=' + str(round(inv[0])) + ' has an unreasonable Received date: ' + rec_date + '\n')
+					log_file.write('Inv id=' + str(round(inv[0])) + ' has an unreasonable received date: ' + rec_date + '\n')
 			out_invs.append(inv[10].strip())        # final
 			out_invs.append('')                     # skip row (treat as final)
 			out_invs.append(inv[11].strip())        # initially accurate
@@ -778,20 +852,20 @@ for sub in subs:
 			start_date = inv[23].strip()[0:10]
 			out_invs.append(start_date)             # start date
 			if not is_date_reasonable(text_to_date(start_date)):
-				log_file.write('Inv id=' + str(round(inv[0])) + ' has an unreasonable Start date: ' + start_date + '\n')
+				log_file.write('Inv id=' + str(round(inv[0])) + ' has an unreasonable start date: ' + start_date + '\n')
 			end_date = inv[24].strftime('%m/%d/%Y')
 			out_invs.append(end_date)               # end date
 			if not is_date_reasonable(text_to_date(end_date)):
-				log_file.write('Inv id=' + str(round(inv[0])) + ' has an unreasonable End date: ' + end_date + '\n')
-			out_invs.append(sub[97].strip()) 	      # osp invoice type
+				log_file.write('Inv id=' + str(round(inv[0])) + ' has an unreasonable end date: ' + end_date + '\n')
+			out_invs.append(sub[97].strip()) 	      # osp invoice type - DB or ADJ
 			idcr = text_to_float(inv[31])
 			idcr_reformatted = round((idcr * 100), 2)
 			out_invs.append(str(idcr_reformatted))  # idc rate
 
-			# check if end date is greater than start date; make a log entry if true
+			# check if end date is greater than start date; make a log entry if not true
 			dates_diff = text_to_date(end_date) - text_to_date(start_date)
 			if dates_diff <= timedelta(days = 0):
-				log_file.write('Inv id=' + str(round(inv[0])) + ' has a strange Start-End date range\n')
+				log_file.write('Inv id=' + str(round(inv[0])) + ' has start date >= end date but will still be migrated\n')
 
 			out_inv = '|'.join(out_invs)
 			outfile_invs.write(out_inv + '\n')
@@ -799,16 +873,18 @@ for sub in subs:
 
 			wbse = sub[1].strip()
 			inv_num = inv[2].strip()
-			
-			# gl_bucket: 1 = 6916xx, 2 = 6971xx, or 3=both
 
+			# gl_bucket: 1 = 6916xx, 2 = 6971xx, or 3=both
 			for index, amount in enumerate(line_items):
 				if amount:
+					if index != 6:    # we don't care about IDC
+						used_exp_categories.add(budget_categories[categories_list[index]])
+
 					amount = round(amount, 2)
 					gl_bucket = get_gl_bucket(gl_break, prior_exp, amount)
 
 					if gl_bucket == 1 or gl_bucket == 2:
-						cost_elem = budget_items[index][gl_bucket - 1]
+						cost_elem = exp_categories[index][gl_bucket - 1]
 						inv_detail = [wbse, inv_num, str(amount), cost_elem]
 						inv_detail = '|'.join(inv_detail)
 						outfile_invs_details.write(inv_detail + '\n')
@@ -817,12 +893,12 @@ for sub in subs:
 						amount_1 = round((gl_break - prior_exp), 2)
 						amount_2 = round((amount - amount_1), 2)
 						# gl bucket 1
-						cost_elem = budget_items[index][0]  
+						cost_elem = exp_categories[index][0]  
 						inv_detail = [wbse, inv_num, str(amount_1), cost_elem]
 						inv_detail = '|'.join(inv_detail)
 						outfile_invs_details.write(inv_detail + '\n')						
 						# gl bucket 2
-						cost_elem = budget_items[index][1]
+						cost_elem = exp_categories[index][1]
 						inv_detail = [wbse, inv_num, str(amount_2), cost_elem]
 						inv_detail = '|'.join(inv_detail)
 						outfile_invs_details.write(inv_detail + '\n')
@@ -830,10 +906,41 @@ for sub in subs:
 
 					prior_exp += amount
 
+	# At this point, we have passed through one sub and all its invoices.
+	# Now, check for existance of zero budget categories that had expenses:
+	# if found, add $1 in each of those budget categories; then add the sum
+	# of those $1s to GL 693558(F&A) so the net change equals 0.
+	spent_but_unbudgeted = used_exp_categories.difference(used_budget_categories)
+	count_spent_but_unbudgeted = len(spent_but_unbudgeted)
+	if count_spent_but_unbudgeted:
+		for gl in spent_but_unbudgeted:
+			amount = '1'
+			category_gl = gl
+			last_wbse = wbse
+			sub_detail = [last_wbse, last_fisc_per, last_fisc_yr, last_start, last_end, amount, category_gl, last_idc_rate_reformatted]
+			sub_detail = '|'.join(sub_detail)
+			# print(sub_detail)
+			outfile_subs_details.write(sub_detail + '\n')
+			output2_count += 1
+		# add the negative amount so the net change equals 0
+		amount = '-' + str(count_spent_but_unbudgeted)
+		category_gl = '693558'  # the F&A gl, per Mary's email from 7/20/2017
+		last_wbse = wbse
+		sub_detail = [last_wbse, last_fisc_per, last_fisc_yr, last_start, last_end, amount, category_gl, last_idc_rate_reformatted]
+		sub_detail = '|'.join(sub_detail)
+		# print(sub_detail)
+		outfile_subs_details.write(sub_detail + '\n')
+		output2_count += 1
+		subs_fixed_with_dollar_adds += 1
+		affected_gls = ', '.join(spent_but_unbudgeted)
+		log_file.write('Sub wbse=' + last_wbse + ' edited with one-dollar addition(s) to budget account(s) ' + affected_gls + '\n')
+
 to_print = 'Subs dropped for having empty budgets...'; print(to_print, end='')
 print(padded_text(subs_dropped_for_zero_budgets, len(to_print)))
-to_print = 'Invs dropped for having zero totals...'; print(to_print, end='')
-print(padded_text(invs_dropped_for_zero_amount, len(to_print)))
+to_print = 'Subs fixed with $1 additions to plan...'; print(to_print, end='')
+print(padded_text(subs_fixed_with_dollar_adds, len(to_print)))
+to_print = 'Invs with $0 total but still migrated...'; print(to_print, end='')
+print(padded_text(invs_with_zero_total, len(to_print)))
 
 to_print = 'Output records created - subs:'; print(to_print, end='')
 print(padded_text(output1_count, len(to_print)))
