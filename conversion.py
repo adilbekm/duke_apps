@@ -654,6 +654,8 @@ for sub in subs:
 			log_file.write('Sub wbse=' + wbse + ' has an unreasonable End date: ' + end + '\n')
 		idc_rate = sub[72 + i]
 		idc_rate = text_to_float(idc_rate)
+		idc_adj_amt = sub[78 + i]
+		idc_adj_amt = text_to_float(idc_adj_amt)
 		idc_rate_reformatted = str(round((idc_rate * 100), 2))
 
 		# check if end date is greater than start date; make a log entry if true
@@ -718,15 +720,12 @@ for sub in subs:
 			used_budget_categories.add(category_gl)
 
 		# idc (indirect cost)
-		if idc_rate:
+		if idc_rate or idc_adj_amt:
 			direct_cost =  sum([float(item[0]) for item in line_items])
-			adj_amt = sub[78 + i]
-			adj_amt = text_to_float(adj_amt)
-			if direct_cost:
-				idc = direct_cost * idc_rate + adj_amt
-				idc = str(round(idc, 2))
-				category_gl = budget_categories['idc']
-				line_items.append((idc, category_gl))
+			idc = direct_cost * idc_rate + idc_adj_amt
+			idc = str(round(idc, 2))
+			category_gl = budget_categories['idc']
+			line_items.append((idc, category_gl))
 
 		# equipment
 		equipment = sub[84 + i]
